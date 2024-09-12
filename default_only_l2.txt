@@ -1,0 +1,11 @@
+[Testcase 1]: L2 53877; PVBand 56412; EPE 13; Shot: 305; SolveTime: 0.90s
+[Testcase 2]: L2 39098; PVBand 52399; EPE 7; Shot: 243; SolveTime: 0.90s
+[Testcase 3]: L2 94425; PVBand 77115; EPE 65; Shot: 373; SolveTime: 0.90s
+[Testcase 4]: L2 28641; PVBand 24436; EPE 14; Shot: 110; SolveTime: 0.90s
+[Testcase 5]: L2 45676; PVBand 58953; EPE 2; Shot: 314; SolveTime: 0.89s
+[Testcase 6]: L2 46111; PVBand 50788; EPE 2; Shot: 384; SolveTime: 0.90s
+[Testcase 7]: L2 36790; PVBand 48963; EPE 5; Shot: 225; SolveTime: 0.89s
+[Testcase 8]: L2 17548; PVBand 23282; EPE 1; Shot: 181; SolveTime: 0.90s
+[Testcase 9]: L2 53384; PVBand 62895; EPE 6; Shot: 298; SolveTime: 0.90s
+[Testcase 10]: L2 12897; PVBand 19460; EPE 0; Shot: 167; SolveTime: 0.90s
+[Result]: L2 42845; PVBand 47470; EPE 11.5; Shot 260.0; SolveTime 0.90s

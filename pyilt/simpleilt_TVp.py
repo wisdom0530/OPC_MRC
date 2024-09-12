@@ -18,6 +18,10 @@ import pylitho.simple as lithosim
 import pyilt.initializer as initializer
 import pyilt.evaluation as evaluation
 
+
+import CGD
+
+
 class SimpleCfg: 
     def __init__(self, config): 
         # Read the config from file or a given dict
@@ -62,26 +66,54 @@ class SimpleILT:
         backup = params
         params = params.clone().detach().requires_grad_(True)
 
+
         # Optimizer 
-        opt = optim.SGD([params], lr=self._config["StepSize"])
+        # opt = optim.SGD([params], lr=self._config["StepSize"])
         # opt = optim.Adam([params], lr=self._config["StepSize"])
 
+        opt = CGD.Constraint([params], torch.optim.SGD, lr=self._config["StepSize"])
+
+        opt.g_constraint = 15000.0
+        #opt.g_constraint = 0
+        #opt.g_constraint = float("-inf")
+        #opt.g_constraint = float("inf")
+        
+        
         # Optimization process
         lossMin, l2Min, pvbMin = 1e12, 1e12, 1e12
         bestParams = None
         bestMask = None
         for idx in range(self._config["Iterations"]): 
-
             mask = torch.sigmoid(self._config["SigmoidSteepness"] * params) * self._filter
             mask += torch.sigmoid(self._config["SigmoidSteepness"] * backup) * (1.0 - self._filter)
             printedNom, printedMax, printedMin = self._lithosim(mask)
-            
 
             l2loss = func.mse_loss(printedNom, target, reduction="sum")
+
+            #TV Loss
+            p = 0.5
+            delta = 1e-6
+            
+            v = torch.sub(mask, target)
+            #v = mask
+            
+            #h_x = v.size()[0]
+            #w_x = v.size()[1]
+            h_tv = torch.pow( torch.abs(v[1:, :] - v[:-1, :]) + delta, p ).sum()
+            #h_tv = torch.pow( torch.abs( v[1:, :] - v[:h_x- 1, :] ), p ).sum()
+            #h_tv = torch.norm( ( v[1:, :] - v[:-1, :] ),  p )
+            w_tv = torch.pow( torch.abs(v[:, 1:] - v[:, :-1]) + delta, p ).sum()
+            #w_tv = torch.pow( torch.abs( v[:, 1:] - v[:, :w_x - 1] ), p ).sum()
+            #w_tv = torch.norm( ( v[:, 1:] - v[:, :- 1] ), p )
+
+            tvloss =  h_tv + w_tv
+
             pvbl2 = func.mse_loss(printedMax, target, reduction="sum") + func.mse_loss(printedMin, target, reduction="sum")
             pvbloss = func.mse_loss(printedMax, printedMin, reduction="sum")
             pvband = torch.sum((printedMax >= self._config["TargetDensity"]) != (printedMin >= self._config["TargetDensity"]))
             loss = l2loss + self._config["WeightPVBL2"] * pvbl2 + self._config["WeightPVBand"] * pvbloss
+            #loss = l2loss
+
             if not curv is None: 
                 kernelCurv = torch.tensor([[-1.0/16, 5.0/16, -1.0/16], [5.0/16, -1.0, 5.0/16], [-1.0/16, 5.0/16, -1.0/16]], dtype=REALTYPE, device=DEVICE)
                 curvature = func.conv2d(mask[None, None, :, :], kernelCurv[None, None, :, :])[0, 0]
@@ -89,16 +121,41 @@ class SimpleILT:
                 loss += curv * losscurv
             if verbose == 1: 
                 #print(f"[Iteration {idx}]: L2 = {l2loss.item():.0f}; PVBand: {pvband.item():.0f}")
-                print(f"[Iteration {idx}]: Loss = {loss.item():.0f}; L2 = {l2loss.item():.0f}; PVBand: {pvband.item():.0f}")
-
+                print(f"[Iteration {idx}]: Loss = {loss.item():.0f}; L2 = {l2loss.item():.0f}; PVBand: {pvband.item():.0f}; tvloss = {tvloss.item():.0f}")
             if bestParams is None or bestMask is None or loss.item() < lossMin: 
                 lossMin, l2Min, pvbMin = loss.item(), l2loss.item(), pvband.item()
                 bestParams = params.detach().clone()
                 bestMask = mask.detach().clone()
             
+
+            # Get the value and gradient for the constraint function: g(x)= tvloss
+            opt.g_value = tvloss.item()
+            opt.zero_grad()
+            tvloss.backward(retain_graph=True)
+            opt.first_step()
+
+            # Get the gradient for the objective function: f(x)= loss
             opt.zero_grad()
             loss.backward()
-            opt.step()
+
+
+            '''
+            # Get the value and gradient for the constraint function:   g(x)= loss
+            opt.g_value = loss.item()
+            opt.zero_grad()
+            loss.backward(retain_graph=True)
+            opt.first_step()
+            # Get the gradient for the objective function:   f(x)=tvloss
+            opt.zero_grad()
+            tvloss.backward()
+
+            '''
+            
+            # Gradient correction
+            opt.dbgd_step()
+            # Update params
+            opt.base_optimizer.step()
+
         
         return l2Min, pvbMin, bestParams, bestMask
 
@@ -181,7 +238,8 @@ def serial():
         ref.center(cfg["TileSizeX"]*SCALE, cfg["TileSizeY"]*SCALE, cfg["OffsetX"]*SCALE, cfg["OffsetY"]*SCALE)
         target, params = initializer.PixelInit().run(ref, cfg["TileSizeX"]*SCALE, cfg["TileSizeY"]*SCALE, cfg["OffsetX"]*SCALE, cfg["OffsetY"]*SCALE)
         l2, pvb, epe, shot = evaluation.evaluate(bestMask, target, litho, scale=SCALE, shots=True)
-        cv2.imwrite(f"./tmp/MOSAIC_test{idx}.png", (bestMask * 255).detach().cpu().numpy())
+        #cv2.imwrite(f"./tmp/MOSAIC_test{idx}.png", (bestMask * 255).detach().cpu().numpy())
+        cv2.imwrite(f"./tmp/proposed_mosaic/TVp_MOSAIC_test{idx}.png", (bestMask * 255).detach().cpu().numpy())
 
         print(f"[Testcase {idx}]: L2 {l2:.0f}; PVBand {pvb:.0f}; EPE {epe:.0f}; Shot: {shot:.0f}; SolveTime: {runtime:.2f}s")
 

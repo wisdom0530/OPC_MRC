@@ -40,6 +40,7 @@ class SimpleCfg:
         return self._config[key]
 
 class SimpleILT: 
+
     def __init__(self, config=SimpleCfg("./config/simpleilt2048.txt"), lithosim=lithosim.LithoSim("./config/lithosimple.txt"), device=DEVICE, multigpu=False): 
         super(SimpleILT, self).__init__()
         self._config = config
@@ -53,6 +54,105 @@ class SimpleILT:
         self._filter[self._config["OffsetX"]:self._config["OffsetX"]+self._config["ILTSizeX"], \
                      self._config["OffsetY"]:self._config["OffsetY"]+self._config["ILTSizeY"]] = 1
     
+
+
+    def objective(self):
+
+        x = r = None
+        for p1, p2 in zip(
+                self.parameters(),
+                self.meta_parameters(),
+        ):
+            x = p1
+            r = p2
+            break
+
+        # symmetry control for x
+        x = self.symmetry_control(x)
+
+        # two phase projection
+        x = self.active_func(x)
+        y = two_phase_projection(x, d_s, d_v)
+
+        # symmetry control for r
+        r = self.symmetry_control(r)
+        # r = 0.5 * tanh(r)
+        # remove dim
+        r = torch.squeeze(r)
+        x = torch.squeeze(x)
+
+        similarity = -torch.mean(torch.multiply(r, y))
+        penalty = torch.mean((1 - torch.abs(2 * y - 1)))
+        loss = similarity + self.tao * penalty
+
+        self.c_vio = penalty.data
+
+        return loss
+
+
+    def two_phase_projection(x, d_s, d_v):
+        """
+        Two-phase projection
+        :param x: design variable
+        :param d_s: solid diameter
+        :param d_v: void diameter
+        :return: y: element density
+        """
+        alpha_s = torch.FloatTensor([0.001])
+        alpha_v = torch.FloatTensor([0.001])
+        beta = torch.FloatTensor([6])
+
+        n_s = -1 * (torch.log(alpha_s))
+        n_v = -1 * (torch.log(alpha_v))
+
+        x_s = (1 + alpha_s) / (1 + alpha_s * torch.exp(2 * n_s * (1 - x)))
+        x_v = -(1 + alpha_v) / (1 + alpha_v * torch.exp(2 * n_v * (1 + x)))
+
+        h_s = create_conic_filter(d_s)
+        h_v = create_conic_filter(d_v)
+
+        if len(x_s.shape) < 4:
+            x_s = torch.unsqueeze(torch.unsqueeze(x_s, dim=0), dim=0)
+
+        if len(x_v.shape) < 4:
+            x_v = torch.unsqueeze(torch.unsqueeze(x_v, dim=0), dim=0)
+
+        mu_s = torch.conv2d(x_s, h_s, padding='same')
+        mu_v = torch.conv2d(x_v, h_v, padding='same')
+
+        rho_s = 1 - torch.exp(-beta * mu_s) + mu_s * torch.exp(-beta)
+        rho_v = -1 + torch.exp(beta * mu_v) + mu_v * torch.exp(-beta)
+
+        y = (rho_s + (1 + rho_v)) / 2
+        y = torch.squeeze(y)
+
+        return y
+
+
+    def create_conic_filter(diameter):
+
+        if diameter % 2 == 0:
+            raise ValueError("Diameter should be an odd number.")
+
+        kernel = np.zeros((diameter, diameter))
+
+        center = diameter // 2
+        max_distance = np.sqrt(2 * (center ** 2))
+
+        for i in range(diameter):
+            for j in range(diameter):
+                distance = np.sqrt((i - center) ** 2 + (j - center) ** 2)
+                value = max(0, (1 - distance / max_distance))
+                kernel[i, j] = 1
+
+        kernel = kernel / np.sum(kernel)
+        kernel = torch.unsqueeze(torch.unsqueeze(torch.FloatTensor(kernel), dim=0), dim=0)
+
+        return kernel
+
+
+
+
     def solve(self, target, params, curv=None, verbose=1): 
         # Initialize
         if not isinstance(target, torch.Tensor): 
@@ -70,7 +170,10 @@ class SimpleILT:
         lossMin, l2Min, pvbMin = 1e12, 1e12, 1e12
         bestParams = None
         bestMask = None
+
+
         for idx in range(self._config["Iterations"]): 
+
 
             mask = torch.sigmoid(self._config["SigmoidSteepness"] * params) * self._filter
             mask += torch.sigmoid(self._config["SigmoidSteepness"] * backup) * (1.0 - self._filter)
@@ -82,6 +185,8 @@ class SimpleILT:
             pvbloss = func.mse_loss(printedMax, printedMin, reduction="sum")
             pvband = torch.sum((printedMax >= self._config["TargetDensity"]) != (printedMin >= self._config["TargetDensity"]))
             loss = l2loss + self._config["WeightPVBL2"] * pvbl2 + self._config["WeightPVBand"] * pvbloss
+
+
             if not curv is None: 
                 kernelCurv = torch.tensor([[-1.0/16, 5.0/16, -1.0/16], [5.0/16, -1.0, 5.0/16], [-1.0/16, 5.0/16, -1.0/16]], dtype=REALTYPE, device=DEVICE)
                 curvature = func.conv2d(mask[None, None, :, :], kernelCurv[None, None, :, :])[0, 0]
@@ -99,6 +204,29 @@ class SimpleILT:
             opt.zero_grad()
             loss.backward()
             opt.step()
+
+
+            for idx in range(50):
+
+                x = tuple(params())
+                inner_optim = optim.Adam(x, lr=0.025)
+                loop_time = 12
+                self.tao = 0.25
+                with torch.enable_grad():
+                    for i in range(loop_time):
+                        for _ in range(6):
+
+                            loss = self.objective()
+
+                            inner_optim.zero_grad()
+                            loss.backward(inputs=x)
+                            inner_optim.step()
+
+                    self.tao *= 3.6
+
+
+
+
         
         return l2Min, pvbMin, bestParams, bestMask
 
